@@ -1,0 +1,211 @@
+//////////////////////////////////////////////////////////////////////////
+// Open System-on-a-Chip (OpenSoC) is Copyright (c) 2014,               //
+// The Regents of the University of California, through Lawrence        //
+// Berkeley National Laboratory (subject to receipt of any required     //
+// approvals from the U.S. Dept. of Energy).  All rights reserved.      //
+//                                                                      //
+// Portions may be copyrighted by others, as may be noted in specific   //
+// copyright notices within specific files.                             //
+//                                                                      //
+// AUTHOR: J. Bachan, F. Fatollahi-Fard                                 //
+//////////////////////////////////////////////////////////////////////////
+// See LICENSE for license details.
+
+package Chisel.util
+
+import Chisel._
+//import scala.reflect.runtime.{universe => ru}
+import scala.reflect.ClassTag
+
+/** Generate a mapping from Strings to small integers and use
+  *  the small integers to tag/encode raw bits (pack)
+  *  and decode (unpack) tagged bits.
+  *  This structure is pure Scala, and by itself, generates no hardware.
+  */
+case class UnionTags(tag2data: Map[String, Chisel.Data]) {
+  // Generate an array to convert code tags into strings.
+  private val codeToTagname = tag2data.keys.toArray.sorted
+  // Generate the map from string to tag code.
+  private val tag2code = Map(codeToTagname zip codeToTagname.indices:_*)
+
+  def tagNames: Array[String] = codeToTagname
+  // Determine the width required to represent all the tag bits.
+  private[Chisel] val codeWidth = log2Up(tag2data.size)
+  // Determine the widest value we'll need to tag.
+  private[Chisel] val tailWidth = tag2data.values.map(_.toBits.getWidth).foldLeft(0)(math.max)
+  // The width of tagged data (code + widest value)
+  val width : Int = codeWidth + tailWidth
+
+  /** Return the tag code corresponding to a specific tag name.
+    *  @param the tag name
+    *  @return the integer value of the tag
+    */
+  def tagNameToCode(tagName: String): Int = tag2code(tagName)
+}
+
+/** TBits construction factory.
+  *
+  */
+object TBits {
+  def apply(unionTags: UnionTags): TBits = {
+    new TBits(unionTags)
+  }
+  private val tagged = true
+  val goodNames = if (tagged) {
+    Array("taggedBits")
+  } else {
+    Array("b_codeBits", "a_tailBits")
+  }
+}
+
+/** The bits representing a tagged union are implemented as a Bundle.
+  *
+  */
+class TBits(unionTags: UnionTags) extends Bundle {
+  override def cloneType: this.type =
+    new TBits(unionTags).asInstanceOf[this.type]
+
+  override def checkPort(obj : Any, name : String) : Boolean = {
+    TBits.goodNames.contains(name)
+  }
+  // Our width is determined by the union tags
+  override def width: Int = unionTags.width
+  val codeWidth = unionTags.codeWidth
+  val tailWidth = unionTags.tailWidth
+  override def toString: String = "TBits[%s]".format(unionTags.tagNames.mkString(","))
+  override def getWidth: Int = this.width
+
+  // The encoded or "tagged" bits.
+  private[Chisel] val taggedBits = UInt(width = this.width)
+  // Order is important here if we want to leave it up to Bundle to perform the {from,to}Bits,
+  //  and we want to mimic the tagged case as far as peeking and poking go.
+  private[Chisel] val a_tailBits = UInt(width = tailWidth)
+  private[Chisel] val b_codeBits = UInt(width = codeWidth)
+
+  override def fromBits(theBits: Bits) : this.type = {
+    val res = if (TBits.tagged || true) {
+      super.fromBits(theBits)
+    } else {
+      val codeIndex = 0
+      val tailIndex = codeIndex + codeWidth
+      val res = this.cloneType
+      res.b_codeBits assign NodeExtract(theBits, codeIndex + codeWidth - 1, codeIndex)
+      res.a_tailBits assign NodeExtract(theBits, tailIndex + tailWidth - 1, tailIndex)
+      res.setIsTypeNode
+      res
+    }
+    res
+  }
+  /** Packs the value of this object as plain Bits.
+    *
+    * This performs the inverse operation of fromBits(Bits).
+    */
+  override def toBits(): UInt = {
+    val res = if (TBits.tagged || true) {
+      super.toBits()
+    } else {
+      Cat(b_codeBits, a_tailBits)
+    }
+		res
+  }
+
+  /** Check for a tag match.
+   *  @param tag string name of tag to check.
+   *  @param tagged bits
+   *  @return true if the tag code matches the code associated with the tag string name.
+   *  We tacitly assume that the tagged bits we're checking were created by this union.
+   */
+  def tagEquals(tag: String, x: Bits) : Chisel.Bool = {
+    val code = if (TBits.tagged) {
+      x.apply(0, codeWidth-1)
+    } else {
+      x
+    }
+    code === Chisel.UInt(unionTags.tagNameToCode(tag))
+  }
+
+
+  /** Check for a tag match.
+   *  @param tag string name of tag to check.
+   *  @return true if the tag code matches the code associated with the tag string name.
+   *  We tacitly assume that the tagged bits we're checking were created by this union.
+   */
+  def tagEquals(tag: String) : Chisel.Bool = {
+    val bits = if (TBits.tagged) {
+      taggedBits
+    } else {
+      b_codeBits
+    }
+    tagEquals(tag, bits)
+  }
+
+  /** Pack (encode) a tag code in bits.
+   *  @param tag string name of tag to pack.
+   *  @param bits to be tagged.
+   *  @return tagged bits padded out to the maximum width required to represent all possible tagged values.
+   */
+  def pack[T <: Chisel.Data](tag: String, x: T) : Chisel.Bits = {
+    val tagType = ClassTag(unionTags.tag2data(tag).getClass)
+    val xType = ClassTag(x.getClass)
+    assert(tagType == xType, s"pack: ${xType} is not a ${tagType}")
+    val code = UInt(unionTags.tagNameToCode(tag), width = codeWidth)
+
+    val xb = x.toBits
+
+    // println("code width: " + codeWidth + "\txb getWidth: " + xb.getWidth + "\tthis.width: " + this.width)
+    val zerosWidth = this.width - (codeWidth + xb.getWidth)
+    // Concatenate the bits to be tagged and the tag code (and optional padding if required).
+    if (zerosWidth == 0) {
+      Cat(xb, code)
+    } else {
+      val zeros = UInt(0, width = zerosWidth)
+      Cat(zeros, xb, code)
+    }
+  }
+
+  def packMe[T <: Chisel.Data](tagName: String, data: T) : Unit = {
+    if (TBits.tagged) {
+      taggedBits := pack(tagName, data)
+    } else {
+      b_codeBits := UInt(unionTags.tagNameToCode(tagName))
+      a_tailBits := data.toBits()
+    }
+  }
+
+  def packMe[T <: Chisel.Data](x: UInt) : Unit = {
+    if (TBits.tagged) {
+      taggedBits := x
+    } else {
+      fromBits(x)
+    }
+  }
+
+  def unpack[T <: Chisel.Data](tag: String) : T = {
+    val res = if (TBits.tagged) {
+      unpack[T](tag, taggedBits)
+   } else {
+      val data = unionTags.tag2data(tag).cloneType
+      data.fromBits(a_tailBits).asInstanceOf[T]
+    }
+    res
+  }
+
+  /** Unpack (extract) the untagged bits from previously tagged bits.
+   *  @param tag string name of the tag.
+   *  @param tagged bits
+   *  @return untagged bits
+   * Presumably, knowing that the bits have been tagged using this tag union is sufficient
+   *  to extract the tag code and from there determine the actual data.
+   */
+  def unpack[T <: Chisel.Data](tag: String, x: Chisel.Bits) : T = {
+    val data = unionTags.tag2data(tag).cloneType
+    // println("data getWidth: " + data.toBits.getWidth + "\twidth: " + data.width)
+    data.fromBits(x.apply(codeWidth+data.toBits.getWidth-1, codeWidth)).asInstanceOf[T]
+  }
+}
+
+
+
+object Hi {
+  def main(args: Array[String]) = println("Hi!")
+}
