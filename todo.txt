@@ -1,0 +1,5 @@
+- create union tracker object
+- generate wiring to convert head flit into common flit
+- generate wiring to convert common flit into head flit
+- generate wiring to do stuff based on type of flit
+
