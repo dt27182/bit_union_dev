@@ -1,4 +1,5 @@
 import Chisel._
+import Chisel.iotesters._
 
 class BitUnionDUT extends Module {
   val io = new Bundle {
@@ -14,13 +15,14 @@ class BitUnionDUT extends Module {
   io.bodyOut := Flit.body(bodyFlit).asBody().bits
 }
 
-class BitUnionTests(c: BitUnionDUT) extends Tester(c) {
+class BitUnionTests(c: BitUnionDUT) extends PeekPokeTester(c) {
+//class BitUnionTests(c: BitUnionDUT) extends Tester(c) {
   expect(c.io.headOut, 3)
   expect(c.io.bodyOut, 10)
 }
 
 object Hi {
   def main(args: Array[String]): Unit = {
-    chiselMainTest(Array("--test", "--compile", "--genHarness", "--backend", "c"), () => Module(new BitUnionDUT())) {(c) => new BitUnionTests(c)}
+    chiselMainTest(Array("--test", "--compile", "--genHarness", "--backend", "c"), () => new BitUnionDUT()) {(c) => new BitUnionTests(c)}
   }
 }
